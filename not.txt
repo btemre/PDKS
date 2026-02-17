@@ -1,0 +1,476 @@
+201in wamp httpd-vhost.conf
+# Virtual Hosts
+#
+<VirtualHost *:80>
+  ServerName localhost
+  ServerAlias localhost
+  DocumentRoot "${INSTALL_DIR}/www"
+  <Directory "${INSTALL_DIR}/www/">
+    Options +Indexes +Includes +FollowSymLinks +MultiViews
+    AllowOverride All
+    Require all granted
+  </Directory>
+</VirtualHost>
+ALTTAKİ İLE DEĞİŞ
+<VirtualHost *:80> 
+DocumentRoot "C:/wamp64/www/proje/public" 
+<Directory "C:/wamp64/www/proje/public"> 
+AllowOverride All Require all granted 
+</Directory> 
+</VirtualHost>
+
+
+manuel cihaz için 99 id  sini atsın
+
+cd C:\wamp64\www\proje
+composer install
+
+composer update
+php artisan key:generatephp artisan serve
+php artisan migrate
+php artisan optimize
+php artisan route:clear
+npm install
+npm run dev
+php artisan make:controller Backend/IzinController
+php artisan make:model Izin
+php artisan make:model Izin --migration
+php artisan make:migration create_izin_table 
+php artisan migrate
+composer require laravel/breeze --dev
+php artisan breeze:install
+php artisan migrate:fresh ----yeni alan eklemseini getiriyor eski verileri silerek
+php artisan make:seeder UserSeeder --- ön taqnımlı verileri oluşturur
+php artisan db:seed ---yukarıda ki tanımlı veriyi çalıştırır
+php artisan r:l
+php artisan migrate:fresh --seed
+php artisan config:clear
+php artisan cache:clear
+php artisan view:clear
+php artisan about
+php artisan report:daily
+composer dump-autoload
+
+ALTER TABLE `jenerator`
+ADD COLUMN `jenerator_tur`  tinyint NULL AFTER `jenerator_durum`,
+ADD COLUMN `jenerator_en`  decimal(5,2) NULL AFTER `jenerator_tur`,
+ADD COLUMN `jenerator_boy`  decimal(5,2) NULL AFTER `jenerator_en`,
+ADD COLUMN `jenerator_yukseklik`  decimal(5,2) NULL AFTER `jenerator_boy`;
+
+
+
+
+ALTER TABLE `permissions` ADD `group_name` VARCHAR(255) NULL AFTER `updated_at`; -- yeni yetkilendirme için
+ALTER TABLE `ayar` ADD `ayar_basmuhendis` VARCHAR(50) NULL AFTER `ayar_yoneticiunvan`; 
+ALTER TABLE `ayar` ADD `ayar_basmuhendisunvan` VARCHAR(50) NULL AFTER `ayar_basmuhendis`; 
+
+ALTER TABLE ayar
+ADD COLUMN created_at TIMESTAMP NULL DEFAULT NULL,
+ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL;
+
+
+CREATE TABLE `personel_kart_gecmisi`  (
+  `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT,
+  `personel_id` int NOT NULL,
+  `kart_id` bigint UNSIGNED NULL DEFAULT NULL,
+  `baslangic_tarihi` date NOT NULL,
+  `bitis_tarihi` date NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  `durum` enum('0','1') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT '1',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `personel_kart_gecmisi_personel_id_foreign`(`personel_id` ASC) USING BTREE,
+  INDEX `personel_kart_gecmisi_kart_id_foreign`(`kart_id` ASC) USING BTREE,
+  CONSTRAINT `personel_kart_gecmisi_kart_id_foreign` FOREIGN KEY (`kart_id`) REFERENCES `pdks_kartlar` (`kart_id`) ON DELETE SET NULL ON UPDATE RESTRICT,
+  CONSTRAINT `personel_kart_gecmisi_personel_id_foreign` FOREIGN KEY (`personel_id`) REFERENCES `personel` (`personel_id`) ON DELETE CASCADE ON UPDATE RESTRICT
+) 
+
+
+
+
+
+<?php
+
+namespace App\Console\Commands;
+
+use App\Models\RaporMail;
+use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
+use App\Mail\DailyReportMail;
+use Carbon\Carbon;
+
+class SendDailyReport extends Command
+{
+    protected $signature = 'report:daily {--date= : Belirli bir tarih için rapor (Y-m-d formatında)}';
+    protected $description = 'Günlük PDKS raporlarını mail atar - Gelmeyen, Giriş-Çıkış, Geç Gelen ve Erken Çıkan personel raporları';
+
+    public function handle()
+    {
+        $targetDate = $this->option('date') ?: date('Y-m-d'); // Bugün
+        //$targetDate = $this->option('date') ?: date('Y-m-d', strtotime('-1 day'));//önceki gün
+
+        $this->info("📊 PDKS Günlük Raporu hazırlanıyor... Tarih: {$targetDate}");
+
+        try {
+            // Tüm raporları hazırla
+            $reports = [
+                'Kart Tanımsız Personeller' => $this->getKartTanimsizPersonel($targetDate),
+                'Gelmeyen Personeller' => $this->getGelmeyenPersonel($targetDate),
+                'Giriş-Çıkış Kayıtları' => $this->getGirisCikisKayitlari($targetDate),
+                'Geç Gelen Personeller' => $this->getGecGelenPersonel($targetDate),
+                'Erken Çıkan Personeller' => $this->getErkenCikanPersonel($targetDate)
+            ];
+
+            // Rapor özeti
+            $this->displaySummary($reports, $targetDate);
+
+            // Mail gönder
+            $this->sendReports($reports, $targetDate);
+
+        } catch (\Exception $e) {
+            $this->error("❌ Hata oluştu: " . $e->getMessage());
+            return 1;
+        }
+
+        return 0;
+    }
+
+    /**
+     * Sadece kartı tanımlı olmayan personelleri listeler.
+     */
+    private function getKartTanimsizPersonel($targetDate)
+    {
+        $this->info("❓ Kartı tanımsız personeller analiz ediliyor...");
+
+        // Hafta sonu ve tatil kontrolü
+        $carbonDate = Carbon::parse($targetDate);
+        $isWeekend = $carbonDate->isWeekend();
+        $tatiller = DB::table('tatil')->pluck('tatil_tarih')->toArray();
+        $isTatil = in_array($targetDate, $tatiller);
+
+        if ($isWeekend || $isTatil) {
+            return collect([]);
+        }
+
+        // Tüm aktif personelleri al
+        $personeller = DB::table('personel as p')
+            ->join('birim as b', 'b.birim_id', '=', 'p.personel_birim')
+            ->join('unvan as u', 'u.unvan_id', '=', 'p.personel_unvan')
+            ->leftJoin('pdks_personel_kartlar as ppk', function ($join) {
+                $join->on('ppk.personel_id', '=', 'p.personel_id')
+                    ->where('p.personel_kartkullanim', '1');
+            })
+            ->where('p.personel_durum', '1')
+            ->whereNull('ppk.kart_id') // Sadece kart ID'si null olanları bul
+            ->select('p.personel_adsoyad', 'b.birim_ad', 'u.unvan_ad')
+            ->get();
+        
+        $kartTanimsizlar = collect();
+        foreach ($personeller as $personel) {
+            $kartTanimsizlar->push((object)[
+                'personel_adsoyad' => $personel->personel_adsoyad,
+                'birim_ad' => $personel->birim_ad,
+                'unvan_ad' => $personel->unvan_ad,
+                'tarih' => $targetDate,
+                'giris' => null,
+                'cikis' => null,
+                'durum' => 'KART TANIMSIZ',
+                'gecikme_suresi' => null
+            ]);
+        }
+
+        return $kartTanimsizlar->sortBy('personel_adsoyad')->values();
+    }
+
+    /**
+     * Gelmeyen Personel Raporunu hazırlar. Artık kartı tanımsız olanları listelemez.
+     */
+    private function getGelmeyenPersonel($targetDate)
+    {
+        $this->info("🔍 Gelmeyen personeller analiz ediliyor...");
+        
+        // Hafta sonu ve tatil kontrolü
+        $carbonDate = Carbon::parse($targetDate);
+        $isWeekend = $carbonDate->isWeekend();
+        
+        // Tatiller
+        $tatiller = DB::table('tatil')->pluck('tatil_tarih')->toArray();
+        $isTatil = in_array($targetDate, $tatiller);
+        
+        if ($isWeekend || $isTatil) {
+            return collect([]);
+        }
+
+        // Tüm aktif ve kartı tanımlı personeller
+        $personeller = DB::table('personel as p')
+            ->join('birim as b', 'b.birim_id', '=', 'p.personel_birim')
+            ->join('unvan as u', 'u.unvan_id', '=', 'p.personel_unvan')
+            ->join('pdks_personel_kartlar as ppk', function ($join) {
+                $join->on('ppk.personel_id', '=', 'p.personel_id')
+                    ->where('p.personel_kartkullanim', '1');
+            })
+            ->leftJoin('pdks_kartlar as pk', 'pk.kart_id', '=', 'ppk.kart_id')
+            ->where('p.personel_durum', '1')
+            ->select('p.personel_id', 'p.personel_adsoyad', 'b.birim_ad', 'u.unvan_ad', 'ppk.kart_id')
+            ->get();
+
+        // İzinliler
+        $izinliler = DB::table('izin as i')
+        ->join('izin_turleri as it', 'it.izin_turid', '=', 'i.izin_turid')
+        ->where('i.izin_durum', '1')
+        ->whereDate('i.izin_baslayis', '<=', $targetDate)
+        ->whereDate('i.izin_bitis', '>=', $targetDate)
+        ->select('i.izin_personel', 'it.izin_ad')
+        ->get()
+        ->keyBy('izin_personel');
+
+        // O gün giriş yapan kart ID'leri
+        $gelenKartlar = DB::table('pdks_cihaz_gecisler')
+            ->whereDate('gecis_tarihi', $targetDate)
+            ->pluck('kart_id')
+            ->unique()
+            ->toArray();
+
+        $gelmeyenler = collect();
+
+        foreach ($personeller as $personel) {
+            $durum = '';
+            
+            // İzinli
+            if ($izinliler->has($personel->personel_id)) {
+                $izinTuru = $izinliler[$personel->personel_id]->izin_ad;
+                $durum = "İZİNLİ ({$izinTuru})";
+            }
+            // Gelmemiş
+            elseif (!in_array($personel->kart_id, $gelenKartlar)) {
+                $durum = 'GELMEDİ';
+            }
+            else {
+                continue; // Gelenleri listeye ekleme
+            }
+
+            $gelmeyenler->push((object)[
+                'personel_adsoyad' => $personel->personel_adsoyad,
+                'birim_ad' => $personel->birim_ad,
+                'unvan_ad' => $personel->unvan_ad,
+                'tarih' => $targetDate,
+                'giris' => null,
+                'cikis' => null,
+                'durum' => $durum,
+                'gecikme_suresi' => null
+            ]);
+        }
+
+        return $gelmeyenler->sortBy('durum')->values();
+    }
+
+    /**
+     * Giriş-Çıkış Kayıtlarını hazırlar
+     */
+    private function getGirisCikisKayitlari($targetDate)
+    {
+        $this->info("📋 Giriş-çıkış kayıtları hazırlanıyor...");
+
+        return DB::table('personel')
+            ->join('pdks_kartlar', 'pdks_kartlar.kart_personelid', '=', 'personel.personel_id')
+            ->join('pdks_cihaz_gecisler', 'pdks_cihaz_gecisler.kart_id', '=', 'pdks_kartlar.kart_id')
+            ->join('birim', 'birim.birim_id', '=', 'personel.personel_birim')
+            ->join('unvan', 'unvan.unvan_id', '=', 'personel.personel_unvan')
+            ->join('mesai_saati', 'mesai_saati.mesai_id', '=', 'personel.personel_mesai')
+            ->leftJoin('izin_mazeret', function ($join) use ($targetDate) {
+                $join->on('izin_mazeret.izinmazeret_personel', '=', 'personel.personel_id')
+                    ->whereDate('izin_mazeret.izinmazeret_baslayis', $targetDate);
+            })
+            ->leftJoin('izin_turleri', 'izin_turleri.izin_turid', '=', 'izin_mazeret.izinmazeret_turid')
+            ->whereDate('pdks_cihaz_gecisler.gecis_tarihi', $targetDate)
+            ->where('personel.personel_durum', '1')
+            ->select(
+                'personel.personel_adsoyad',
+                'birim.birim_ad',
+                'unvan.unvan_ad',
+                DB::raw("'{$targetDate}' as tarih"),
+                DB::raw('GROUP_CONCAT(pdks_cihaz_gecisler.gecis_tarihi ORDER BY pdks_cihaz_gecisler.gecis_tarihi ASC) as gecisler'),
+                DB::raw('MAX(mesai_saati.mesai_giris) as mesai_giris'),
+                DB::raw('MAX(mesai_saati.mesai_cikis) as mesai_cikis'),
+                DB::raw('MAX(izin_turleri.izin_ad) as izin_turu')
+            )
+            ->groupBy('personel.personel_id')
+            ->get()
+            ->map(function ($record) {
+                $gecisList = explode(',', $record->gecisler);
+                $girisZamani = isset($gecisList[0]) ? Carbon::parse($gecisList[0]) : null;
+                $cikisZamani = count($gecisList) > 1 ? Carbon::parse(end($gecisList)) : null; // Tek kayıt ise çıkış yok
+                $mesaiGiris = Carbon::parse($record->tarih . ' ' . $record->mesai_giris);
+                $mesaiCikis = Carbon::parse($record->tarih . ' ' . $record->mesai_cikis);
+
+                $durum = 'NORMAL';
+                $gecikme = null;
+
+                // Giriş kontrolü
+                if ($girisZamani && $girisZamani->gt($mesaiGiris)) {
+                    $gecikme = $girisZamani->diff($mesaiGiris);
+                    $durum = 'GEÇ GELDİ';
+                }
+
+                // Çıkış kontrolü (varsa)
+                if ($cikisZamani && $cikisZamani->lt($mesaiCikis)) {
+                    $durum = ($durum === 'GEÇ GELDİ') ? 'GEÇ GELDİ & ERKEN ÇIKTI' : 'ERKEN ÇIKTI';
+                }
+
+                // İzin kontrolü
+                if ($record->izin_turu) {
+                    $durum = 'İZİNLİ (' . $record->izin_turu . ')';
+                }
+
+                $record->giris = $girisZamani ? $girisZamani->format('H:i:s') : null;
+                $record->cikis = $cikisZamani ? $cikisZamani->format('H:i:s') : null;
+                $record->durum = $durum;
+                $record->gecikme_suresi = $gecikme ? $gecikme->format('%H:%I') : null;
+
+                return $record;
+            });
+    }
+
+    /**
+     * Erken Çıkan Personeli hazırlar - DÜZELTİLMİŞ VERSİYON
+     */
+    private function getErkenCikanPersonel($targetDate)
+    {
+        $this->info("🏃‍♂️ Erken çıkan personeller tespit ediliyor...");
+
+        // Doğrudan veritabanından erken çıkanları getir
+        return DB::table('personel')
+            ->join('pdks_kartlar', 'pdks_kartlar.kart_personelid', '=', 'personel.personel_id')
+            ->join('pdks_cihaz_gecisler', 'pdks_cihaz_gecisler.kart_id', '=', 'pdks_kartlar.kart_id')
+            ->join('birim', 'birim.birim_id', '=', 'personel.personel_birim')
+            ->join('unvan', 'unvan.unvan_id', '=', 'personel.personel_unvan')
+            ->join('mesai_saati', 'mesai_saati.mesai_id', '=', 'personel.personel_mesai')
+            ->leftJoin('izin_mazeret', function ($join) use ($targetDate) {
+                $join->on('izin_mazeret.izinmazeret_personel', '=', 'personel.personel_id')
+                    ->whereDate('izin_mazeret.izinmazeret_baslayis', $targetDate);
+            })
+            ->leftJoin('izin_turleri', 'izin_turleri.izin_turid', '=', 'izin_mazeret.izinmazeret_turid')
+            ->whereDate('pdks_cihaz_gecisler.gecis_tarihi', $targetDate)
+            ->where('personel.personel_durum', '1')
+            ->whereNull('izin_mazeret.izinmazeret_id') // İzinlileri hariç tut
+            ->select(
+                'personel.personel_adsoyad',
+                'birim.birim_ad',
+                'unvan.unvan_ad',
+                DB::raw("'{$targetDate}' as tarih"),
+                DB::raw('MIN(pdks_cihaz_gecisler.gecis_tarihi) as giris'),
+                DB::raw('MAX(pdks_cihaz_gecisler.gecis_tarihi) as cikis'),
+                DB::raw('MAX(mesai_saati.mesai_cikis) as mesai_cikis')
+            )
+            ->groupBy('personel.personel_id')
+            // Sadece çıkış kaydı olanları al ve erken çıkanları filtrele
+            ->havingRaw('COUNT(pdks_cihaz_gecisler.gecis_tarihi) > 1') // En az 2 kayıt olmalı (giriş+çıkış)
+            ->havingRaw('TIME(MAX(pdks_cihaz_gecisler.gecis_tarihi)) < MAX(mesai_saati.mesai_cikis)')
+            ->get()
+            ->map(function ($record) {
+                $cikisZamani = Carbon::parse($record->cikis);
+                $mesaiCikis = Carbon::parse($record->tarih . ' ' . $record->mesai_cikis);
+                $erkenlik = $mesaiCikis->diff($cikisZamani);
+                
+                $record->durum = 'ERKEN ÇIKTI';
+                $record->gecikme_suresi = $erkenlik->format('%H:%I') . ' erken';
+                
+                // Sadece saat:dakika formatında göster
+                $record->giris = Carbon::parse($record->giris)->format('H:i:s');
+                $record->cikis = Carbon::parse($record->cikis)->format('H:i:s');
+                
+                return $record;
+            });
+    }
+
+    /**
+     * Geç Gelen Personeli hazırlar
+     */
+    private function getGecGelenPersonel($targetDate)
+    {
+        $this->info("⏰ Geç gelen personeller tespit ediliyor...");
+
+        return DB::table('personel')
+            ->join('pdks_kartlar', 'pdks_kartlar.kart_personelid', '=', 'personel.personel_id')
+            ->join('pdks_cihaz_gecisler', 'pdks_cihaz_gecisler.kart_id', '=', 'pdks_kartlar.kart_id')
+            ->join('birim', 'birim.birim_id', '=', 'personel.personel_birim')
+            ->join('unvan', 'unvan.unvan_id', '=', 'personel.personel_unvan')
+            ->join('mesai_saati', 'mesai_saati.mesai_id', '=', 'personel.personel_mesai')
+            ->leftJoin('izin_mazeret', function ($join) use ($targetDate) {
+                $join->on('izin_mazeret.izinmazeret_personel', '=', 'personel.personel_id')
+                    ->whereDate('izin_mazeret.izinmazeret_baslayis', $targetDate);
+            })
+            ->whereDate('pdks_cihaz_gecisler.gecis_tarihi', $targetDate)
+            ->where('personel.personel_durum', '1')
+            ->whereNull('izin_mazeret.izinmazeret_id') // İzinlileri hariç tut
+            ->select(
+                'personel.personel_adsoyad',
+                'birim.birim_ad',
+                'unvan.unvan_ad',
+                DB::raw("'{$targetDate}' as tarih"),
+                DB::raw('MIN(pdks_cihaz_gecisler.gecis_tarihi) as giris'),
+                DB::raw('MAX(pdks_cihaz_gecisler.gecis_tarihi) as cikis'),
+                DB::raw("'GEÇ GELDİ' as durum"),
+                DB::raw('MAX(mesai_saati.mesai_giris) as mesai_giris')
+            )
+            ->groupBy('personel.personel_id')
+            ->havingRaw('TIME(MIN(pdks_cihaz_gecisler.gecis_tarihi)) > MAX(mesai_saati.mesai_giris)')
+            ->get()
+            ->map(function ($record) {
+                $girisZamani = Carbon::parse($record->giris);
+                $mesaiGiris = Carbon::parse($record->tarih . ' ' . $record->mesai_giris);
+                $gecikme = $girisZamani->diff($mesaiGiris);
+                $record->gecikme_suresi = $gecikme->format('%H:%I');
+                return $record;
+            });
+    }
+
+    /**
+     * Rapor özetini konsola yazdırır
+     */
+    private function displaySummary($reports, $targetDate)
+    {
+        $this->info("\n📈 RAPOR ÖZETİ - {$targetDate}");
+        $this->info("═══════════════════════════════");
+        
+        foreach ($reports as $raporAdi => $data) {
+            $count = is_countable($data) ? count($data) : $data->count();
+            $this->line("📊 {$raporAdi}: {$count} kişi");
+        }
+        
+        $this->info("═══════════════════════════════");
+    }
+
+    /**
+     * Mail gönderim işlemi
+     */
+    private function sendReports($reports, $targetDate)
+    {
+        // DB’den aktif mail adreslerini çek
+        $emails = RaporMail::where('durum', 1)->pluck('email')->toArray();
+    
+        if (empty($emails)) {
+            $this->warn("⚠️ Gönderilecek aktif mail adresi bulunamadı!");
+            return;
+        }
+    
+        $this->info("\n📧 Mail gönderiliyor...");
+    
+        try {
+            foreach ($emails as $email) {
+                Mail::to($email)->send(new DailyReportMail(
+                    $reports, 
+                    "PDKS Günlük Detay Raporu - " . Carbon::parse($targetDate)->format('d.m.Y')
+                ));
+            }
+    
+            $this->info("✅ Raporlar başarıyla gönderildi!");
+            $this->line("📬 Gönderilen adresler: " . implode(', ', $emails));
+    
+        } catch (\Exception $e) {
+            $this->error("❌ Mail gönderim hatası: " . $e->getMessage());
+            throw $e;
+        }
+    }
+}
